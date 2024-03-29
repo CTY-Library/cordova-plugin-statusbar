@@ -79,8 +79,8 @@ var StatusBar = {
         StatusBar.isVisible = false;
     },
 
-    show: function () {
-        exec(null, null, 'StatusBar', 'show', []);
+    show: function (doOverlay) {
+        exec(null, null, 'StatusBar', 'show', [doOverlay]);
         StatusBar.isVisible = true;
     }
 };
