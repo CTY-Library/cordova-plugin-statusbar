@@ -54,6 +54,7 @@ public class StatusBar extends CordovaPlugin {
 
     private AppCompatActivity activity;
     private Window window;
+    private boolean overlaysWebView = true;
 
     /**
      * Sets the context of the Command. This can then be used to do things like
@@ -76,14 +77,16 @@ public class StatusBar extends CordovaPlugin {
             window.clearFlags(WindowManager.LayoutParams.FLAG_FORCE_NOT_FULLSCREEN);
 
             // Read 'StatusBarOverlaysWebView' from config.xml, default is true.
-            setStatusBarTransparent(preferences.getBoolean("StatusBarOverlaysWebView", true));
+            overlaysWebView = preferences.getBoolean("StatusBarOverlaysWebView", true);
 
             // Read 'StatusBarBackgroundColor' from config.xml, default is #000000.
             setStatusBarBackgroundColor(preferences.getString("StatusBarBackgroundColor", "#000000"));
 
+            setStatusBarTransparent(overlaysWebView);
+
             // Read 'StatusBarStyle' from config.xml, default is 'lightcontent'.
             setStatusBarStyle(
-                preferences.getString("StatusBarStyle", STYLE_LIGHT_CONTENT).toLowerCase()
+                    preferences.getString("StatusBarStyle", STYLE_LIGHT_CONTENT).toLowerCase()
             );
         });
     }
@@ -121,37 +124,23 @@ public class StatusBar extends CordovaPlugin {
             //     return true;
             case ACTION_SHOW:
                 activity.runOnUiThread(() -> {
-                    try {
-                        boolean isTransparent = args.getBoolean(0);
-                        if(isTransparent){
-                            final Window window = cordova.getActivity().getWindow();
-                            int visibility = isTransparent
-                                    ? View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                                    : View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_VISIBLE;
-                            window.getDecorView().setSystemUiVisibility(visibility);
-                            window.setStatusBarColor(Color.TRANSPARENT);
-                        }
-                        else {
-                            int uiOptions = window.getDecorView().getSystemUiVisibility();
-                            uiOptions &= ~View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN;
-                            uiOptions &= ~View.SYSTEM_UI_FLAG_FULLSCREEN;
-                            window.getDecorView().setSystemUiVisibility(uiOptions);
-                        }
+                    int uiOptions = window.getDecorView().getSystemUiVisibility();
+                    uiOptions &= ~View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN;
+                    uiOptions &= ~View.SYSTEM_UI_FLAG_FULLSCREEN;
 
-                        // CB-11197 We still need to update LayoutParams to force status bar
-                        // to be hidden when entering e.g. text fields
-                        window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
-                    } catch (JSONException ignore) {
-                        LOG.e(TAG, "Invalid boolean argument");
-                    }
+                    window.getDecorView().setSystemUiVisibility(uiOptions);
+
+                    // CB-11197 We still need to update LayoutParams to force status bar
+                    // to be hidden when entering e.g. text fields
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
                 });
                 return true;
 
             case ACTION_HIDE:
                 activity.runOnUiThread(() -> {
                     int uiOptions = window.getDecorView().getSystemUiVisibility()
-                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                        | View.SYSTEM_UI_FLAG_FULLSCREEN;
+                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_FULLSCREEN;
 
                     window.getDecorView().setSystemUiVisibility(uiOptions);
 
@@ -174,7 +163,8 @@ public class StatusBar extends CordovaPlugin {
             case ACTION_OVERLAYS_WEB_VIEW:
                 activity.runOnUiThread(() -> {
                     try {
-                        setStatusBarTransparent(args.getBoolean(0));
+                        overlaysWebView = args.getBoolean(0);
+                        setStatusBarTransparent(overlaysWebView);
                     } catch (JSONException ignore) {
                         LOG.e(TAG, "Invalid boolean argument");
                     }
@@ -207,19 +197,93 @@ public class StatusBar extends CordovaPlugin {
 
         window.clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS); // SDK 19-30
         window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS); // SDK 21
-        window.setStatusBarColor(color);
+
+        // overlaysWebView=true 时，保持透明，避免背景色覆盖导致“看起来未生效”。
+        if (overlaysWebView) {
+            window.setStatusBarColor(Color.TRANSPARENT);
+        } else {
+            window.setStatusBarColor(color);
+        }
     }
 
-    private void setStatusBarTransparent(final boolean isTransparent) {
+    private void setStatusBarTransparent(final boolean transparent) {
         final Window window = cordova.getActivity().getWindow();
-        int visibility = isTransparent
-            ? View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-            : View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_VISIBLE;
+        View decorView = window.getDecorView();
+        int uiOptions = (decorView != null) ? decorView.getSystemUiVisibility() : 0;
 
-        window.getDecorView().setSystemUiVisibility(visibility);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            // 统一使用标准 Android API，避免机型分支带来的不一致行为。
+            window.clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS);
+            window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
 
-        if (isTransparent) {
-            window.setStatusBarColor(Color.TRANSPARENT);
+            if (transparent) {
+                // 覆盖 WebView：内容进入状态栏/刘海区域。
+                window.setStatusBarColor(Color.TRANSPARENT);
+                uiOptions |= View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_STABLE;
+                WindowCompat.setDecorFitsSystemWindows(window, false);
+                setStatusBarViewVisible(false);
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    try {
+                        WindowManager.LayoutParams lp = window.getAttributes();
+                        lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                        window.setAttributes(lp);
+                    } catch (Exception e) {
+                        LOG.w(TAG, "Failed to set layoutInDisplayCutoutMode", e);
+                    }
+                }
+            } else {
+                // 不覆盖 WebView：内容回到状态栏下方。
+                uiOptions &= ~View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN;
+                uiOptions &= ~View.SYSTEM_UI_FLAG_LAYOUT_STABLE;
+                WindowCompat.setDecorFitsSystemWindows(window, true);
+                setStatusBarViewVisible(true);
+
+                String colorPref = preferences.getString("StatusBarBackgroundColor", "#000000");
+                try {
+                    window.setStatusBarColor(Color.parseColor(colorPref));
+                } catch (IllegalArgumentException e) {
+                    window.setStatusBarColor(Color.BLACK);
+                }
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    try {
+                        WindowManager.LayoutParams lp = window.getAttributes();
+                        lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT;
+                        window.setAttributes(lp);
+                    } catch (Exception e) {
+                        LOG.w(TAG, "Failed to restore layoutInDisplayCutoutMode", e);
+                    }
+                }
+            }
+        }
+
+        if (decorView != null) {
+            decorView.setSystemUiVisibility(uiOptions);
+        }
+
+        // 透明时通常是浅色背景，非透明时通常是深色背景；保留插件原有可控性。
+        if (Build.VERSION.SDK_INT >= 30 && decorView != null) {
+            final WindowInsetsControllerCompat insetsController =
+                    WindowCompat.getInsetsController(window, decorView);
+            if (insetsController != null) {
+                insetsController.setAppearanceLightStatusBars(!transparent);
+            }
+        }
+    }
+
+    private void setStatusBarViewVisible(boolean visible) {
+        View root = window.getDecorView();
+        if (root == null) return;
+
+        View statusBarView = root.findViewWithTag("statusBarView");
+        if (statusBarView == null) return;
+
+        statusBarView.setVisibility(visible ? View.VISIBLE : View.GONE);
+
+        View parent = (statusBarView.getParent() instanceof View) ? (View) statusBarView.getParent() : null;
+        if (parent != null) {
+            parent.requestApplyInsets();
         }
     }
 
